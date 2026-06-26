@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: aisearch-multi-region
+metadata:
+  template: aisearch-multi-region@0.0.1
+
+# This project is a console app + infra — no hosted services to deploy.
+# 'azd provision' deploys all infrastructure; 'azd down' tears it down.
+
+hooks:
+  preprovision:
+    windows:
+      shell: pwsh
+      run: scripts/preprovision.ps1
+      interactive: false
+      continueOnError: false
+    posix:
+      shell: pwsh
+      run: scripts/preprovision.ps1
+      interactive: false
+      continueOnError: false
+  postprovision:
+    windows:
+      shell: pwsh
+      run: scripts/postprovision.ps1
+      interactive: false
+      continueOnError: false
+    posix:
+      shell: pwsh
+      run: scripts/postprovision.ps1
+      interactive: false
+      continueOnError: false

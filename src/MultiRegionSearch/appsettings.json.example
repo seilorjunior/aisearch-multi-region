@@ -1,0 +1,19 @@
+{
+  "Search": {
+    "IndexName": "products",
+    "Gateway": {
+      "Url": "https://<name-prefix>.<gateway-location>.cloudapp.azure.com",
+      "AllowSelfSignedCert": true
+    },
+    "Regions": [
+      {
+        "Name": "eastus",
+        "Endpoint": "https://<name-prefix>-eastus.search.windows.net"
+      },
+      {
+        "Name": "westus2",
+        "Endpoint": "https://<name-prefix>-westus2.search.windows.net"
+      }
+    ]
+  }
+}

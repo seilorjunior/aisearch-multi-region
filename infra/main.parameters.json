@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "principalId": {
+      "value": "${AZURE_PRINCIPAL_ID}"
+    },
+    "principalType": {
+      "value": "${AZURE_PRINCIPAL_TYPE}"
+    },
+    "namePrefix": {
+      "value": "${NAME_PREFIX}"
+    },
+    "dnsLabel": {
+      "value": "${DNS_LABEL}"
+    },
+    "sslCertData": {
+      "value": "${SSL_CERT_DATA}"
+    },
+    "sslCertPassword": {
+      "value": "${SSL_CERT_PASSWORD}"
+    },
+    "searchRegions": {
+      "value": ["eastus", "westus2"]
+    }
+  }
+}
