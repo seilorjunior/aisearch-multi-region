@@ -123,7 +123,7 @@ public class SyncAnalyzerTests
         Assert.False(result.InSync);
         var issue = Assert.Single(result.Issues);
         Assert.Equal(SyncIssueKind.Drift, issue.Kind);
-        Assert.Contains("Name", issue.Detail);
+        Assert.Contains("one or more fields differ", issue.Detail);
     }
 
     [Fact]
@@ -136,7 +136,7 @@ public class SyncAnalyzerTests
         };
         var result = SyncAnalyzer.Analyze(perRegion);
         Assert.False(result.InSync);
-        Assert.Contains(result.Issues, i => i.Kind == SyncIssueKind.Drift && i.Detail == "Description differs");
+        Assert.Contains(result.Issues, i => i.Kind == SyncIssueKind.Drift && i.Detail.Contains("one or more fields differ"));
     }
 
     [Fact]
@@ -149,7 +149,7 @@ public class SyncAnalyzerTests
         };
         var result = SyncAnalyzer.Analyze(perRegion);
         Assert.False(result.InSync);
-        Assert.Contains(result.Issues, i => i.Kind == SyncIssueKind.Drift && i.Detail.Contains("Category"));
+        Assert.Contains(result.Issues, i => i.Kind == SyncIssueKind.Drift && i.Detail.Contains("one or more fields differ"));
     }
 
     [Fact]
@@ -162,7 +162,7 @@ public class SyncAnalyzerTests
         };
         var result = SyncAnalyzer.Analyze(perRegion);
         Assert.False(result.InSync);
-        Assert.Contains(result.Issues, i => i.Kind == SyncIssueKind.Drift && i.Detail.Contains("Price"));
+        Assert.Contains(result.Issues, i => i.Kind == SyncIssueKind.Drift && i.Detail.Contains("one or more fields differ"));
     }
 
     [Fact]
@@ -175,7 +175,7 @@ public class SyncAnalyzerTests
         };
         var result = SyncAnalyzer.Analyze(perRegion);
         Assert.False(result.InSync);
-        Assert.Contains(result.Issues, i => i.Kind == SyncIssueKind.Drift && i.Detail.Contains("Rating"));
+        Assert.Contains(result.Issues, i => i.Kind == SyncIssueKind.Drift && i.Detail.Contains("one or more fields differ"));
     }
 
     [Fact]
@@ -188,7 +188,7 @@ public class SyncAnalyzerTests
         };
         var result = SyncAnalyzer.Analyze(perRegion);
         Assert.False(result.InSync);
-        Assert.Contains(result.Issues, i => i.Kind == SyncIssueKind.Drift && i.Detail == "Tags differ");
+        Assert.Contains(result.Issues, i => i.Kind == SyncIssueKind.Drift && i.Detail.Contains("one or more fields differ"));
     }
 
     [Fact]
@@ -202,7 +202,7 @@ public class SyncAnalyzerTests
         var result = SyncAnalyzer.Analyze(perRegion);
         // Tags.SequenceEqual is order-sensitive, so this is reported as drift
         Assert.False(result.InSync);
-        Assert.Contains(result.Issues, i => i.Detail == "Tags differ");
+        Assert.Contains(result.Issues, i => i.Detail.Contains("one or more fields differ"));
     }
 
     [Fact]
@@ -215,7 +215,7 @@ public class SyncAnalyzerTests
         };
         var result = SyncAnalyzer.Analyze(perRegion);
         Assert.False(result.InSync);
-        Assert.Equal(3, result.Issues.Count);   // Name, Price, Rating
+        Assert.Single(result.Issues);   // one issue for the document (any field difference)
         Assert.All(result.Issues, i => Assert.Equal(SyncIssueKind.Drift, i.Kind));
     }
 

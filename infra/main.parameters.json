@@ -22,6 +22,9 @@
     },
     "searchRegions": {
       "value": ["eastus", "westus2"]
+    },
+    "indexName": {
+      "value": "products"
     }
   }
 }

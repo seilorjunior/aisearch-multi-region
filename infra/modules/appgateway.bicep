@@ -18,6 +18,19 @@ param sslCertData string
 @secure()
 param sslCertPassword string
 
+@description('Address prefix for the VNet created for the Application Gateway.')
+param vnetAddressPrefix string = '10.40.0.0/16'
+
+@description('Address prefix for the Application Gateway subnet inside the VNet.')
+param subnetAddressPrefix string = '10.40.0.0/24'
+
+@description('SKU name for the Application Gateway. Use WAF_v2 for internet-facing workloads.')
+@allowed([
+  'Standard_v2'
+  'WAF_v2'
+])
+param gatewaySkuName string = 'Standard_v2'
+
 var appGwName = '${namePrefix}-agw'
 var vnetName = '${namePrefix}-vnet'
 var pipName = '${namePrefix}-pip'
@@ -29,14 +42,14 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = {
   properties: {
     addressSpace: {
       addressPrefixes: [
-        '10.40.0.0/16'
+        vnetAddressPrefix
       ]
     }
     subnets: [
       {
         name: subnetName
         properties: {
-          addressPrefix: '10.40.0.0/24'
+          addressPrefix: subnetAddressPrefix
         }
       }
     ]
@@ -62,8 +75,8 @@ resource appgw 'Microsoft.Network/applicationGateways@2023-11-01' = {
   location: location
   properties: {
     sku: {
-      name: 'Standard_v2'
-      tier: 'Standard_v2'
+      name: gatewaySkuName
+      tier: gatewaySkuName
     }
     autoscaleConfiguration: {
       minCapacity: 1

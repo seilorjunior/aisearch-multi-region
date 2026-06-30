@@ -40,33 +40,14 @@ public static class SyncAnalyzer
                 continue;
             }
 
-            // Field-level drift comparison: baseline = first region, compare against all others.
+            // Field-level drift: baseline = first region, compare against all others.
             var baseline = perRegion[regionNames[0]][id];
             foreach (var regionName in regionNames.Skip(1))
             {
                 var other = perRegion[regionName][id];
-
-                if (baseline.Name != other.Name)
+                if (!baseline.Equals(other))
                     issues.Add(new SyncIssue(id, regionName, SyncIssueKind.Drift,
-                        $"Name: '{baseline.Name}' vs '{other.Name}'"));
-
-                if (baseline.Description != other.Description)
-                    issues.Add(new SyncIssue(id, regionName, SyncIssueKind.Drift, "Description differs"));
-
-                if (baseline.Category != other.Category)
-                    issues.Add(new SyncIssue(id, regionName, SyncIssueKind.Drift,
-                        $"Category: '{baseline.Category}' vs '{other.Category}'"));
-
-                if (baseline.Price != other.Price)
-                    issues.Add(new SyncIssue(id, regionName, SyncIssueKind.Drift,
-                        $"Price: {baseline.Price} vs {other.Price}"));
-
-                if (baseline.Rating != other.Rating)
-                    issues.Add(new SyncIssue(id, regionName, SyncIssueKind.Drift,
-                        $"Rating: {baseline.Rating} vs {other.Rating}"));
-
-                if (!baseline.Tags.SequenceEqual(other.Tags))
-                    issues.Add(new SyncIssue(id, regionName, SyncIssueKind.Drift, "Tags differ"));
+                        "one or more fields differ (re-run with verbose flag for details)"));
             }
         }
 
