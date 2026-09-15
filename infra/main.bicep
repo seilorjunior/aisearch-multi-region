@@ -42,6 +42,16 @@ param sslCertPassword string
 ])
 param searchSku string = 'basic'
 
+@description('Name of the Azure AI Search index to create.')
+param indexName string = 'products'
+
+@description('SKU name for the Application Gateway. Use WAF_v2 for internet-facing workloads.')
+@allowed([
+  'Standard_v2'
+  'WAF_v2'
+])
+param gatewaySkuName string = 'Standard_v2'
+
 module search 'modules/search.bicep' = [
   for (region, i) in searchRegions: {
     name: 'search-${i}-${region}'
@@ -64,12 +74,13 @@ module gateway 'modules/appgateway.bicep' = {
     sslCertData: sslCertData
     sslCertPassword: sslCertPassword
     searchFqdns: [for i in range(0, length(searchRegions)): search[i].outputs.fqdn]
+    gatewaySkuName: gatewaySkuName
   }
 }
 
 output gatewayFqdn string = gateway.outputs.fqdn
 output gatewayUrl string = 'https://${gateway.outputs.fqdn}'
-output indexName string = 'products'
+output indexName string = indexName
 output searchEndpoints array = [
   for i in range(0, length(searchRegions)): {
     region: searchRegions[i]

@@ -176,13 +176,23 @@ async Task SyncCheckAsync()
         var docs = new Dictionary<string, Product>();
         try
         {
-            var response = await client.SearchAsync<Product>("*",
-                new SearchOptions { Size = 1000, IncludeTotalCount = true });
+            int skip = 0;
+            const int pageSize = 1000;
+            while (true)
+            {
+                var response = await client.SearchAsync<Product>("*",
+                    new SearchOptions { Size = pageSize, Skip = skip, IncludeTotalCount = true });
+                int count = 0;
+                await foreach (var result in response.Value.GetResultsAsync())
+                {
+                    docs[result.Document.Id] = result.Document;
+                    count++;
+                }
+                if (count < pageSize) break;
+                skip += pageSize;
+            }
 
-            await foreach (var result in response.Value.GetResultsAsync())
-                docs[result.Document.Id] = result.Document;
-
-            Console.WriteLine($"[sync-check] {region.Name}: {response.Value.TotalCount} documents");
+            Console.WriteLine($"[sync-check] {region.Name}: {docs.Count} documents");
         }
         catch (Exception ex)
         {
