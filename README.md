@@ -399,6 +399,12 @@ Liveness/error metrics do **not** prove index readiness or replication freshness
 authenticated `status` / `sync-check --json` runs from a connected host and alert on nonzero
 exit codes. Run content comparisons while writes are quiescent; they are not transactional
 snapshots, and the sample's offset-based comparison is bounded for large indexes.
+Multi-page comparisons require a **sortable `Id`** for deterministic ordering. Existing demo
+indexes created by `init` have an unsortable key and remain supported up to 1,000 documents
+in a single page. Larger legacy indexes fail explicitly instead of comparing unstable pages.
+To compare larger indexes, create a new index with `Id` sortable, reindex from the authoritative
+source, and update the client configuration; existing indexes are never deleted or rebuilt
+automatically.
 
 ### Isolated failover/recovery exercise
 

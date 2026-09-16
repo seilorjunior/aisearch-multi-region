@@ -85,15 +85,32 @@ public sealed class AzureSearchService : ISearchService, IDisposable
     {
         var documents = new Dictionary<string, Product>();
         long? expectedCount = null;
+        var ordered = true;
         // Explicit paging is needed: Size=1000 alone only retrieves the first search page.
         // Search's skip limit makes this sample comparison deliberately bounded.
         for (var skip = 0; skip <= 100000; skip += 1000)
         {
-            var response = await clients[region.Name].SearchAsync<Product>("*",
-                new SearchOptions { Size = 1000, Skip = skip, IncludeTotalCount = true }, cancellationToken);
+            var options = new SearchOptions { Size = 1000, Skip = skip, IncludeTotalCount = true };
+            options.OrderBy.Add($"{nameof(Product.Id)} asc");
+            Azure.Response<SearchResults<Product>> response;
+            try
+            {
+                response = await clients[region.Name].SearchAsync<Product>("*", options, cancellationToken);
+            }
+            catch (Azure.RequestFailedException ex) when (ex.Status == 400 && skip == 0)
+            {
+                // Existing demo indexes have an unsortable key. Only a single page is safe
+                // without unique ordering; never use offset paging on those indexes.
+                ordered = false;
+                options.OrderBy.Clear();
+                response = await clients[region.Name].SearchAsync<Product>("*", options, cancellationToken);
+            }
             if (response.Value.TotalCount is not long total || expectedCount is long previous && previous != total)
                 throw new InvalidOperationException("Document count unavailable or changed during paging; retry sync-check.");
             expectedCount = total;
+            if (!ordered && total > 1000)
+                throw new InvalidOperationException(
+                    "Stable sync-check pagination requires a sortable Id field. Reindex into a new index with Id sortable; the legacy index is unchanged.");
             if (expectedCount > 100000)
                 throw new InvalidOperationException("sync-check exceeds the sample's 100,000-document paging bound.");
             var count = 0;
@@ -103,7 +120,7 @@ public sealed class AzureSearchService : ISearchService, IDisposable
                     throw new InvalidOperationException("Documents changed during paging; retry sync-check.");
                 count++;
             }
-            if (count < 1000)
+            if (count < 1000 || documents.Count == expectedCount)
             {
                 if (documents.Count != expectedCount)
                     throw new InvalidOperationException("Incomplete document snapshot; retry sync-check.");
