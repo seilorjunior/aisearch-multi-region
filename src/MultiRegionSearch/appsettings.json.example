@@ -3,8 +3,11 @@
     "IndexName": "products",
     "Gateway": {
       "Url": "https://<name-prefix>.<gateway-location>.cloudapp.azure.com",
-      "AllowSelfSignedCert": true
+      "AllowSelfSignedCert": false
     },
+    "ReplicationJournalPath": "./state/replication-journal.json",
+    "ReadinessTimeoutSeconds": 60,
+    "ReadinessPollIntervalMilliseconds": 500,
     "Regions": [
       {
         "Name": "eastus",

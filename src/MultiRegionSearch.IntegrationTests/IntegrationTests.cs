@@ -1,12 +1,14 @@
 using Azure.Search.Documents;
 using Azure.Search.Documents.Indexes;
+using System.Text.Json;
 
 /// <summary>
 /// Integration tests that exercise the full Azure AI Search data path — init, seed, direct
 /// queries, sync-check, and (optionally) gateway queries — against real Azure endpoints.
 ///
 /// Tests skip automatically when appsettings.json contains placeholder URLs or no regions.
-/// The fixture creates and destroys a dedicated "products-it" index so the production
+/// With AZURE_INTEGRATION_REQUIRED=true, missing endpoints/gateway fail instead of skipping.
+/// The fixture creates and destroys a unique "products-it-{guid}" index so the production
 /// "products" index is never modified.
 ///
 /// Run only this category with:
@@ -18,6 +20,71 @@ public class IntegrationTests : IClassFixture<SearchEnvironmentFixture>
     private readonly SearchEnvironmentFixture _env;
 
     public IntegrationTests(SearchEnvironmentFixture env) => _env = env;
+
+    [SkippableFact]
+    public async Task Commands_DirectQueriesReturnStructuredResults()
+    {
+        Skip.If(!_env.IsConfigured, "No real Azure Search endpoints configured.");
+        foreach (var region in _env.Settings.Regions)
+        {
+            var result = await _env.RunCommandAsync("query-direct", region.Name, "wireless", "--json");
+            Assert.True(result.ExitCode == 0, result.Error);
+            AssertQueryHasHits(result.Output);
+        }
+    }
+
+    [SkippableFact]
+    public async Task Commands_StatusReportsEveryRegion()
+    {
+        Skip.If(!_env.IsConfigured, "No real Azure Search endpoints configured.");
+        var result = await _env.RunCommandAsync("status");
+        Assert.True(result.ExitCode == 0, result.Error);
+        foreach (var region in _env.Settings.Regions)
+            Assert.Contains($"{region.Name}: {SampleData.Products.Count} documents", result.Output);
+    }
+
+    [SkippableFact]
+    public async Task Commands_SyncCheckVerifiesSeededContent()
+    {
+        Skip.If(!_env.IsConfigured || _env.Settings.Regions.Count < 2, "Need at least two configured regions.");
+        var result = await _env.RunCommandAsync("sync-check");
+        Assert.True(result.ExitCode == 0, result.Error);
+        Assert.Contains("all regions are identical", result.Output);
+    }
+
+    [SkippableFact]
+    public async Task Commands_ReplayCompletedSeedIsNoOp()
+    {
+        Skip.If(!_env.IsConfigured, "No real Azure Search endpoints configured.");
+        var journalBefore = await File.ReadAllTextAsync(_env.Settings.ReplicationJournalPath);
+        var result = await _env.RunCommandAsync("replay");
+        Assert.True(result.ExitCode == 0, result.Error);
+        Assert.Contains("No pending replication", result.Output);
+        Assert.Equal(journalBefore, await File.ReadAllTextAsync(_env.Settings.ReplicationJournalPath));
+    }
+
+    [SkippableFact]
+    public async Task Commands_GatewayQueryReturnsStructuredResults()
+    {
+        Skip.If(!_env.IsConfigured || !_env.Settings.Gateway.IsConfigured, "Real endpoints and gateway are required.");
+        var result = await _env.RunCommandAsync("query", "wireless", "--json");
+        Assert.True(result.ExitCode == 0, result.Error);
+        AssertQueryHasHits(result.Output);
+    }
+
+    private static void AssertQueryHasHits(string output)
+    {
+        var foundQuery = false;
+        foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            using var json = JsonDocument.Parse(line);
+            if (json.RootElement.GetProperty("command").GetString() != "query")
+                continue;
+            foundQuery = true;
+            Assert.True(json.RootElement.GetProperty("data").GetProperty("TotalCount").GetInt64() > 0);
+        }
+        Assert.True(foundQuery, "The command did not emit a structured query result.");
+    }
 
     // ── Init ─────────────────────────────────────────────────────────────────
 

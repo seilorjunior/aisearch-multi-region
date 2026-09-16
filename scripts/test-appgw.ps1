@@ -29,6 +29,7 @@
 #>
 
 param(
+    [ValidateRange(1, 1000000)]
     [int]    $Queries          = 20,
     [string] $SearchTerm       = "*",
     [switch] $SkipSslValidation
@@ -56,12 +57,15 @@ function Write-Section([string]$title) {
 }
 
 function New-HttpClient {
+    param([switch]$Gateway)
     $handler = [System.Net.Http.HttpClientHandler]::new()
-    if ($SkipSslValidation) {
+    if ($Gateway -and $SkipSslValidation) {
         $handler.ServerCertificateCustomValidationCallback =
             [System.Net.Http.HttpClientHandler]::DangerousAcceptAnyServerCertificateValidator
     }
-    [System.Net.Http.HttpClient]::new($handler)
+    $client = [System.Net.Http.HttpClient]::new($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds(30)
+    return $client
 }
 
 function Get-SearchToken {
@@ -79,7 +83,7 @@ function Invoke-SearchQuery {
         [string] $Term = "*",
         [int]    $Top  = 5
     )
-    $apiVersion = "2024-05-01-preview"
+    $apiVersion = "2024-07-01"
     $body = @{ search = $Term; top = $Top; count = $true } | ConvertTo-Json
     $content = [System.Net.Http.StringContent]::new(
         $body,
@@ -95,15 +99,21 @@ function Invoke-SearchQuery {
     $request.Headers.Authorization =
         [System.Net.Http.Headers.AuthenticationHeaderValue]::new("Bearer", $Token)
 
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $response = $Client.SendAsync($request).GetAwaiter().GetResult()
-    $sw.Stop()
-    $responseBody = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-    return @{
-        StatusCode   = [int]$response.StatusCode
-        Body         = $responseBody
-        ElapsedMs    = $sw.ElapsedMilliseconds
-        IsSuccess    = $response.IsSuccessStatusCode
+    $response = $null
+    try {
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $response = $Client.SendAsync($request).GetAwaiter().GetResult()
+        $responseBody = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        $sw.Stop()
+        return @{
+            StatusCode   = [int]$response.StatusCode
+            Body         = $responseBody
+            ElapsedMs    = $sw.ElapsedMilliseconds
+            IsSuccess    = $response.IsSuccessStatusCode
+        }
+    } finally {
+        if ($response) { $response.Dispose() }
+        $request.Dispose()
     }
 }
 
@@ -121,9 +131,28 @@ $gatewayUrl = $settings.Search.Gateway.Url
 $indexName  = $settings.Search.IndexName
 $regions    = $settings.Search.Regions
 
-if ($settings.Search.Gateway.AllowSelfSignedCert -and -not $SkipSslValidation) {
-    Write-Host "INFO: appsettings.json has AllowSelfSignedCert=true — enabling -SkipSslValidation automatically." -ForegroundColor Yellow
-    $SkipSslValidation = $true
+if (@($regions).Count -lt 2) {
+    throw "At least two configured regions are required for a multi-region smoke test."
+}
+if ($indexName -cnotmatch '^[a-z0-9][a-z0-9-]{0,126}[a-z0-9]$' -or $indexName.Contains("--")) {
+    throw "Search.IndexName must be a valid Azure AI Search index name."
+}
+$names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($region in $regions) {
+    if ([string]::IsNullOrWhiteSpace($region.Name) -or -not $names.Add($region.Name)) {
+        throw "Region names must be nonempty and unique."
+    }
+}
+foreach ($endpoint in @($gatewayUrl) + @($regions | ForEach-Object { $_.Endpoint })) {
+    $uri = $null
+    if (-not [Uri]::TryCreate($endpoint, [UriKind]::Absolute, [ref]$uri) -or
+        $uri.Scheme -ne "https" -or $uri.UserInfo -or $uri.Query -or $uri.Fragment -or
+        $uri.AbsolutePath -ne "/" -or $uri.Host -match "REPLACE") {
+        throw "All endpoints must be HTTPS origins without credentials, paths, queries, or placeholders."
+    }
+}
+if ($SkipSslValidation) {
+    Write-Warning "Demo only: gateway TLS validation is disabled; regional TLS validation remains enabled."
 }
 
 Write-Host ""
@@ -145,7 +174,8 @@ try {
     exit 1
 }
 
-$client = New-HttpClient
+$client = New-HttpClient -Gateway
+$regionalClient = New-HttpClient
 
 # ── 1. AppGW HTTPS reachability ───────────────────────────────────────────────
 
@@ -170,13 +200,15 @@ Write-Section "2. Backend Health Probes (/ping)"
 
 foreach ($region in $regions) {
     $pingUrl = "$($region.Endpoint)/ping"
+    $req = $null
+    $resp = $null
     try {
         # /ping is unauthenticated — use a bare GET
         $req = [System.Net.Http.HttpRequestMessage]::new(
             [System.Net.Http.HttpMethod]::Get, $pingUrl
         )
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $resp = $client.SendAsync($req).GetAwaiter().GetResult()
+        $resp = $regionalClient.SendAsync($req).GetAwaiter().GetResult()
         $sw.Stop()
         if ([int]$resp.StatusCode -eq 200) {
             Write-Pass "$($region.Name): /ping → 200 OK  ($($sw.ElapsedMilliseconds) ms)"
@@ -185,6 +217,9 @@ foreach ($region in $regions) {
         }
     } catch {
         Write-Fail "$($region.Name): /ping threw exception: $_"
+    } finally {
+        if ($resp) { $resp.Dispose() }
+        if ($req) { $req.Dispose() }
     }
 }
 
@@ -239,9 +274,9 @@ for ($i = 0; $i -lt $Queries; $i++) {
 }
 
 if ($fail4 -eq 0) {
-    $sorted = $latencies | Sort-Object
-    $p50 = $sorted[[int]($sorted.Count * 0.50)]
-    $p95 = $sorted[[int]($sorted.Count * 0.95)]
+    $sorted = @($latencies | Sort-Object)
+    $p50 = $sorted[[Math]::Min($sorted.Count - 1, [Math]::Floor($sorted.Count * 0.50))]
+    $p95 = $sorted[[Math]::Min($sorted.Count - 1, [Math]::Floor($sorted.Count * 0.95))]
     Write-Pass "$ok/$Queries succeeded  |  min=$($sorted[0]) ms  p50=$p50 ms  p95=$p95 ms  max=$($sorted[-1]) ms"
 } else {
     Write-Fail "$fail4/$Queries requests failed  ($ok succeeded)"
@@ -255,7 +290,7 @@ $counts = @{}
 
 foreach ($region in $regions) {
     try {
-        $result = Invoke-SearchQuery -Client $client -BaseUrl $region.Endpoint `
+        $result = Invoke-SearchQuery -Client $regionalClient -BaseUrl $region.Endpoint `
                                      -IndexName $indexName -Token $token -Term "*" -Top 0
         if ($result.IsSuccess) {
             $count = ($result.Body | ConvertFrom-Json).'@odata.count'
@@ -287,4 +322,6 @@ Write-Host "Results: $($script:passed)/$total passed" -ForegroundColor $(if ($sc
 Write-Host "══════════════════════════════════════════" -ForegroundColor White
 Write-Host ""
 
+$client.Dispose()
+$regionalClient.Dispose()
 if ($script:failed -gt 0) { exit 1 }

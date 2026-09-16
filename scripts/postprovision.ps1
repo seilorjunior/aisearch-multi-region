@@ -13,13 +13,21 @@
 param()
 $ErrorActionPreference = "Stop"
 
+if ($env:ALLOW_SELF_SIGNED_CERT -and $env:ALLOW_SELF_SIGNED_CERT -notin @("true", "false")) {
+    throw "ALLOW_SELF_SIGNED_CERT must be true or false."
+}
+$allowSelfSignedCert = $env:ALLOW_SELF_SIGNED_CERT -eq "true"
+if ($allowSelfSignedCert) {
+    Write-Warning "Demo only: gateway TLS certificate validation is explicitly disabled."
+}
+
 $scriptDir = $PSScriptRoot   # scripts/
 $repoRoot  = Split-Path $scriptDir -Parent
 
 # ── 1. Resolve output values ──────────────────────────────────────────────────
 # azd uppercases the Bicep output name as-is (no camelCase→snake conversion),
 # so 'gatewayUrl' → 'GATEWAYURL'. Try both styles for robustness.
-$gatewayUrl         = $env:GATEWAYURL        ?? $env:GATEWAY_URL
+$gatewayUrl         = $env:QUERYENDPOINT     ?? $env:QUERY_ENDPOINT ?? $env:GATEWAYURL ?? $env:GATEWAY_URL
 $indexName          = $env:INDEXNAME         ?? $env:INDEX_NAME
 $searchEndpointsRaw = $env:SEARCHENDPOINTS   ?? $env:SEARCH_ENDPOINTS
 
@@ -42,7 +50,7 @@ if (-not $gatewayUrl) {
     if (-not $dep) { throw "Could not find a deployment with 'gatewayUrl' output in '$rg'." }
 
     $outputs           = $dep.properties.outputs
-    $gatewayUrl        = $outputs.gatewayUrl.value
+    $gatewayUrl        = $outputs.queryEndpoint.value ?? $outputs.gatewayUrl.value
     $indexName         = $outputs.indexName.value
     $searchEndpointsRaw = $outputs.searchEndpoints.value | ConvertTo-Json -Compress
 }
@@ -62,7 +70,7 @@ if ($searchEndpointsRaw) {
 }
 
 if ($regions.Count -eq 0) {
-    Write-Warning "No search endpoints found in outputs; appsettings.json 'Regions' will be empty."
+    throw "No search endpoints found in outputs; refusing to write an unusable appsettings.json."
 }
 
 # ── 3. Build and write appsettings.json ───────────────────────────────────────
@@ -71,7 +79,7 @@ $appsettings = [ordered]@{
         IndexName = $indexName
         Gateway   = [ordered]@{
             Url                = $gatewayUrl
-            AllowSelfSignedCert = $true
+            AllowSelfSignedCert = $allowSelfSignedCert
         }
         Regions = $regions
     }

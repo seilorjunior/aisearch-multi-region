@@ -14,23 +14,23 @@ public class SyncAnalyzerTests
     // ---- single / empty region short-circuit --------------------------------
 
     [Fact]
-    public void Analyze_WithOneRegion_ReturnsInSyncNoIssues()
+    public void Analyze_WithOneRegion_ReturnsNotInSync()
     {
         var perRegion = new Dictionary<string, IReadOnlyDictionary<string, Product>>
         {
             ["east"] = Region(MakeProduct("1"))
         };
         var result = SyncAnalyzer.Analyze(perRegion);
-        Assert.True(result.InSync);
+        Assert.False(result.InSync);
         Assert.Empty(result.Issues);
     }
 
     [Fact]
-    public void Analyze_WithZeroRegions_ReturnsInSyncNoIssues()
+    public void Analyze_WithZeroRegions_ReturnsNotInSync()
     {
         var result = SyncAnalyzer.Analyze(
             new Dictionary<string, IReadOnlyDictionary<string, Product>>());
-        Assert.True(result.InSync);
+        Assert.False(result.InSync);
         Assert.Empty(result.Issues);
     }
 

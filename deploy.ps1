@@ -19,10 +19,24 @@ param(
     [string]$Location = "eastus2",
     [string[]]$SearchRegions = @("eastus2", "westus2"),
     [string]$DnsLabel = "aismr$(Get-Random -Maximum 99999)",
-    [string]$SubscriptionId
+    [string]$SubscriptionId,
+    [string]$GatewayHostName = "",
+    [string]$CertificatePath,
+    [securestring]$CertificatePassword,
+    [switch]$AllowSelfSignedCert
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($CertificatePath -and (-not $CertificatePassword -or -not $GatewayHostName)) {
+    throw "A trusted PFX requires -CertificatePassword and -GatewayHostName matching its DNS name."
+}
+if ($GatewayHostName -and [Uri]::CheckHostName($GatewayHostName) -ne [UriHostNameType]::Dns) {
+    throw "GatewayHostName must be a DNS hostname, not a URL."
+}
+if ($AllowSelfSignedCert) {
+    Write-Warning "Demo only: the generated client configuration will bypass gateway TLS certificate validation."
+}
 
 if ($SubscriptionId) {
     az account set --subscription $SubscriptionId | Out-Null
@@ -32,7 +46,14 @@ Write-Host "==> Resolving signed-in principal..." -ForegroundColor Cyan
 $principalId = az ad signed-in-user show --query id -o tsv
 if (-not $principalId) { throw "Could not resolve signed-in user. Run 'az login' first." }
 
-$fqdn = "$DnsLabel.$Location.cloudapp.azure.com"
+$fqdn = if ($GatewayHostName) { $GatewayHostName } else { "$DnsLabel.$Location.cloudapp.azure.com" }
+if ($CertificatePath) {
+    $certPassword = [System.Net.NetworkCredential]::new("", $CertificatePassword).Password
+    $certData = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path $CertificatePath).Path))
+} else {
+if (-not $IsWindows) {
+    throw "Self-signed certificate generation in deploy.ps1 requires Windows. Use azd provision on Linux/macOS, or supply a trusted PFX."
+}
 Write-Host "==> Generating self-signed certificate for $fqdn ..." -ForegroundColor Cyan
 $certPassword = [System.Guid]::NewGuid().ToString("N")
 $cert = New-SelfSignedCertificate `
@@ -48,6 +69,7 @@ $certData = [System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($pfx
 Remove-Item $pfxPath -Force
 # Tidy up the cert store entry; the PFX bytes are already deployed.
 Remove-Item "Cert:\CurrentUser\My\$($cert.Thumbprint)" -Force -ErrorAction SilentlyContinue
+}
 
 Write-Host "==> Creating resource group $ResourceGroup in $Location ..." -ForegroundColor Cyan
 az group create -n $ResourceGroup -l $Location | Out-Null
@@ -63,13 +85,14 @@ $outputsJson = az deployment group create `
     -p searchRegions=$regionsJson `
     -p gatewayLocation=$Location `
     -p dnsLabel=$DnsLabel `
+    -p gatewayHostName=$GatewayHostName `
     -p sslCertData=$certData `
     -p sslCertPassword=$certPassword `
     --query properties.outputs -o json
 if ($LASTEXITCODE -ne 0) { throw "Deployment failed." }
 
 $outputs = $outputsJson | ConvertFrom-Json
-$gatewayUrl = $outputs.gatewayUrl.value
+$gatewayUrl = $outputs.queryEndpoint.value ?? $outputs.gatewayUrl.value
 $indexName = $outputs.indexName.value
 $searchEndpoints = $outputs.searchEndpoints.value
 
@@ -81,7 +104,7 @@ foreach ($e in $searchEndpoints) {
 $appsettings = [ordered]@{
     Search = [ordered]@{
         IndexName = $indexName
-        Gateway   = [ordered]@{ Url = $gatewayUrl; AllowSelfSignedCert = $true }
+        Gateway   = [ordered]@{ Url = $gatewayUrl; AllowSelfSignedCert = [bool]$AllowSelfSignedCert }
         Regions   = $regions
     }
 }
@@ -92,6 +115,12 @@ Write-Host ""
 Write-Host "Done." -ForegroundColor Green
 Write-Host "  Gateway URL : $gatewayUrl"
 Write-Host "  Regions     : $(( $searchEndpoints | ForEach-Object { $_.region } ) -join ', ')"
+if ($GatewayHostName) {
+    Write-Host "  DNS required: point $GatewayHostName to $DnsLabel.$Location.cloudapp.azure.com"
+}
+if (-not $CertificatePath -and -not $AllowSelfSignedCert) {
+    Write-Warning "TLS validation remains enabled. Trust the demo certificate or explicitly opt in using Search__Gateway__AllowSelfSignedCert=true for local testing."
+}
 Write-Host ""
 Write-Host "RBAC role assignments can take 1-2 minutes to propagate. Then run:" -ForegroundColor Yellow
 Write-Host "  cd src/MultiRegionSearch"

@@ -40,10 +40,10 @@ public class GatewayConfigTests
     }
 
     [Fact]
-    public void DefaultAllowSelfSignedCert_IsTrue()
+    public void DefaultAllowSelfSignedCert_IsFalse()
     {
         var config = new GatewayConfig();
-        Assert.True(config.AllowSelfSignedCert);
+        Assert.False(config.AllowSelfSignedCert);
     }
 
     [Theory]
@@ -52,7 +52,15 @@ public class GatewayConfigTests
     [InlineData("https://REPLACE_WITH_GATEWAY_URL", false)]
     [InlineData("https://replace.example.com", false)]        // "REPLACE" case-insensitive
     [InlineData("https://my-appgw.eastus.cloudapp.azure.com", true)]
-    [InlineData("http://10.0.0.1", true)]
+    [InlineData("http://10.0.0.1", false)]
+    [InlineData("https://host.example/path", false)]
+    [InlineData("https://host.example/a/..", false)]
+    [InlineData("https://user@host.example", false)]
+    [InlineData("https://host.example/?q=x", false)]
+    [InlineData("https://host.example/#fragment", false)]
+    [InlineData("https://host.example/?", false)]
+    [InlineData("https://host.example/#", false)]
+    [InlineData("https://host.example/", true)]
     public void IsConfigured_ReturnsExpected(string url, bool expected)
     {
         var config = new GatewayConfig { Url = url };

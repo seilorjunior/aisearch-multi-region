@@ -6,19 +6,27 @@ on:
   pull_request:
     branches: [ master ]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5.0.0
         with:
           dotnet-version: '8.0.x'
           cache: true
           cache-dependency-path: '**/*.csproj'
+
+      - name: Compile Bicep
+        run: az bicep build --file infra/main.bicep --stdout > /dev/null
 
       - name: Restore dependencies
         run: |
@@ -39,24 +47,95 @@ jobs:
           --logger "console;verbosity=normal"
           --results-directory ./test-results
 
-      - name: Integration tests
-        if: vars.AZURE_INTEGRATION_ENABLED == 'true'
-        env:
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      - name: Offline integration configuration tests
         run: >
           dotnet test src/MultiRegionSearch.IntegrationTests/MultiRegionSearch.IntegrationTests.csproj
-          --no-build
+          --no-build --configuration Release
+          --filter "FullyQualifiedName~IntegrationConfigurationTests"
+          --logger "trx;LogFileName=integration-config-results.trx"
+          --results-directory ./test-results
+
+      - name: Upload test results
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        if: always()
+        with:
+          name: test-results
+          path: ./test-results/*.trx
+          retention-days: 7
+
+  integration:
+    # PR code (including same-repository PRs) never receives Azure credentials.
+    if: github.event_name == 'push' && vars.AZURE_INTEGRATION_ENABLED == 'true'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_INTEGRATION_REQUIRED: 'true'
+      Search__Regions__0__Name: ${{ vars.AZURE_SEARCH_REGION_1_NAME }}
+      Search__Regions__0__Endpoint: ${{ vars.AZURE_SEARCH_REGION_1_ENDPOINT }}
+      Search__Regions__1__Name: ${{ vars.AZURE_SEARCH_REGION_2_NAME }}
+      Search__Regions__1__Endpoint: ${{ vars.AZURE_SEARCH_REGION_2_ENDPOINT }}
+      Search__Gateway__Url: ${{ vars.AZURE_SEARCH_GATEWAY_URL }}
+      Search__Gateway__AllowSelfSignedCert: ${{ vars.AZURE_SEARCH_GATEWAY_ALLOW_SELF_SIGNED_CERT || 'false' }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Require explicit integration configuration
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        shell: python
+        run: |
+          import os, re, uuid
+          from urllib.parse import urlparse
+          for key in ("AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_SUBSCRIPTION_ID"):
+              uuid.UUID(os.environ[key])
+          names, endpoints = set(), set()
+          for i in range(2):
+              name = os.environ[f"Search__Regions__{i}__Name"].strip()
+              endpoint = os.environ[f"Search__Regions__{i}__Endpoint"]
+              uri = urlparse(endpoint)
+              assert name and name.lower() not in names, "Two distinct region names are required"
+              assert uri.scheme == "https" and re.fullmatch(r"[a-z0-9-]+\.search\.windows\.net", uri.hostname or ""), "Real public Azure Search endpoints are required"
+              assert not uri.username and not uri.password and uri.port in (None, 443) and uri.path in ("", "/") and not uri.query and not uri.fragment
+              assert uri.hostname not in endpoints, "Two distinct Search services are required"
+              names.add(name.lower())
+              endpoints.add(uri.hostname)
+          gateway = urlparse(os.environ["Search__Gateway__Url"])
+          assert gateway.scheme == "https" and gateway.hostname and gateway.hostname != "localhost", "An explicit HTTPS gateway URL is required"
+          assert not any(s in gateway.netloc.lower() for s in ("<", ">", "replace", "example")), "Gateway URL must not be a placeholder"
+          assert not gateway.username and not gateway.password and gateway.port in (None, 443) and gateway.path in ("", "/") and not gateway.query and not gateway.fragment
+
+      - name: Azure login (federated identity)
+        uses: azure/login@eec3c95657c1536435858eda1f3ff5437fee8474 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5.0.0
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Integration tests (configuration errors fail, never skip)
+        run: >
+          dotnet test src/MultiRegionSearch.IntegrationTests/MultiRegionSearch.IntegrationTests.csproj
           --configuration Release
           --logger "trx;LogFileName=integration-results.trx"
           --logger "console;verbosity=normal"
           --results-directory ./test-results
 
-      - name: Upload test results
-        uses: actions/upload-artifact@v5
+      - name: Upload integration results
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         if: always()
         with:
-          name: test-results
+          name: integration-results
           path: ./test-results/*.trx
           retention-days: 7

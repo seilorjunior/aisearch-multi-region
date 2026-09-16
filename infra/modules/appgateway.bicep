@@ -18,10 +18,143 @@ param sslCertData string
 @secure()
 param sslCertPassword string
 
+param addressPrefix string = '10.40'
+param enablePrivateEndpoints bool = false
+@description('When nonempty, restrict origin ingress to Azure Front Door and enforce this profile ID in WAF.')
+param frontDoorId string = ''
+param originHostName string = ''
+param logAnalyticsWorkspaceId string = ''
+
 var appGwName = '${namePrefix}-agw'
 var vnetName = '${namePrefix}-vnet'
 var pipName = '${namePrefix}-pip'
 var subnetName = 'appgw-subnet'
+
+resource nsg 'Microsoft.Network/networkSecurityGroups@2023-11-01' = if (!empty(frontDoorId)) {
+  name: '${namePrefix}-origin-nsg'
+  location: location
+  properties: {
+    securityRules: [
+      {
+        name: 'AllowFrontDoorHttps'
+        properties: {
+          priority: 100
+          direction: 'Inbound'
+          access: 'Allow'
+          protocol: 'Tcp'
+          sourceAddressPrefix: 'AzureFrontDoor.Backend'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '443'
+        }
+      }
+      {
+        name: 'AllowGatewayManager'
+        properties: {
+          priority: 110
+          direction: 'Inbound'
+          access: 'Allow'
+          protocol: 'Tcp'
+          sourceAddressPrefix: 'GatewayManager'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '65200-65535'
+        }
+      }
+      {
+        name: 'AllowAzureLoadBalancer'
+        properties: {
+          priority: 120
+          direction: 'Inbound'
+          access: 'Allow'
+          protocol: '*'
+          sourceAddressPrefix: 'AzureLoadBalancer'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '*'
+        }
+      }
+      {
+        name: 'DenyOtherHttps'
+        properties: {
+          priority: 130
+          direction: 'Inbound'
+          access: 'Deny'
+          protocol: 'Tcp'
+          sourceAddressPrefix: '*'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '443'
+        }
+      }
+    ]
+  }
+}
+
+resource originPolicy 'Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies@2023-11-01' = if (!empty(frontDoorId)) {
+  name: '${namePrefix}-origin-policy'
+  location: location
+  properties: {
+    policySettings: {
+      state: 'Enabled'
+      mode: 'Prevention'
+      requestBodyCheck: false
+    }
+    customRules: [
+      {
+        name: 'BlockOtherFrontDoorProfiles'
+        priority: 1
+        ruleType: 'MatchRule'
+        action: 'Block'
+        matchConditions: [
+          {
+            matchVariables: [
+              {
+                variableName: 'RequestHeaders'
+                selector: 'X-Azure-FDID'
+              }
+            ]
+            operator: 'Equal'
+            negationConditon: true
+            matchValues: [
+              frontDoorId
+            ]
+          }
+        ]
+      }
+      {
+        // This policy gates origin access only; do not apply SQL-injection rules to search query syntax.
+        name: 'AllowThisFrontDoorProfile'
+        priority: 2
+        ruleType: 'MatchRule'
+        action: 'Allow'
+        matchConditions: [
+          {
+            matchVariables: [
+              {
+                variableName: 'RequestHeaders'
+                selector: 'X-Azure-FDID'
+              }
+            ]
+            operator: 'Equal'
+            negationConditon: false
+            matchValues: [
+              frontDoorId
+            ]
+          }
+        ]
+      }
+    ]
+    managedRules: {
+      managedRuleSets: [
+        {
+          ruleSetType: 'OWASP'
+          ruleSetVersion: '3.2'
+        }
+      ]
+    }
+  }
+}
 
 resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = {
   name: vnetName
@@ -29,17 +162,26 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = {
   properties: {
     addressSpace: {
       addressPrefixes: [
-        '10.40.0.0/16'
+        '${addressPrefix}.0.0/16'
       ]
     }
-    subnets: [
+    subnets: concat([
       {
         name: subnetName
         properties: {
-          addressPrefix: '10.40.0.0/24'
+          addressPrefix: '${addressPrefix}.0.0/24'
+          ...(!empty(frontDoorId) ? { networkSecurityGroup: { id: nsg!.id } } : {})
         }
       }
-    ]
+    ], enablePrivateEndpoints ? [
+      {
+        name: 'private-endpoints'
+        properties: {
+          addressPrefix: '${addressPrefix}.1.0/24'
+          privateEndpointNetworkPolicies: 'Disabled'
+        }
+      }
+    ] : [])
   }
 }
 
@@ -62,8 +204,13 @@ resource appgw 'Microsoft.Network/applicationGateways@2023-11-01' = {
   location: location
   properties: {
     sku: {
-      name: 'Standard_v2'
-      tier: 'Standard_v2'
+      name: empty(frontDoorId) ? 'Standard_v2' : 'WAF_v2'
+      tier: empty(frontDoorId) ? 'Standard_v2' : 'WAF_v2'
+    }
+    firewallPolicy: !empty(frontDoorId) ? { id: originPolicy!.id } : null
+    sslPolicy: {
+      policyType: 'Predefined'
+      policyName: 'AppGwSslPolicy20220101S'
     }
     autoscaleConfiguration: {
       minCapacity: 1
@@ -168,7 +315,8 @@ resource appgw 'Microsoft.Network/applicationGateways@2023-11-01' = {
           sslCertificate: {
             id: resourceId('Microsoft.Network/applicationGateways/sslCertificates', appGwName, 'appgw-ssl')
           }
-          requireServerNameIndication: false
+          requireServerNameIndication: !empty(originHostName)
+          ...(!empty(originHostName) ? { hostName: originHostName } : {})
         }
       }
     ]
@@ -197,5 +345,30 @@ resource appgw 'Microsoft.Network/applicationGateways@2023-11-01' = {
   }
 }
 
+resource diagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = if (!empty(logAnalyticsWorkspaceId)) {
+  name: 'gateway-diagnostics'
+  scope: appgw
+  properties: {
+    workspaceId: logAnalyticsWorkspaceId
+    logs: [
+      {
+        categoryGroup: 'allLogs'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'AllMetrics'
+        enabled: true
+      }
+    ]
+  }
+}
+
 output fqdn string = pip.properties.dnsSettings.fqdn
 output name string = appgw.name
+output id string = appgw.id
+output publicIpAddress string = pip.properties.ipAddress
+output vnetId string = vnet.id
+output vnetName string = vnet.name
+output privateEndpointSubnetId string = '${vnet.id}/subnets/private-endpoints'

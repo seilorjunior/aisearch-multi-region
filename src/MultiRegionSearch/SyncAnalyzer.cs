@@ -18,7 +18,7 @@ public static class SyncAnalyzer
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, Product>> perRegion)
     {
         if (perRegion.Count < 2)
-            return new SyncCheckResult(true, Array.Empty<SyncIssue>());
+            return new SyncCheckResult(false, Array.Empty<SyncIssue>());
 
         var regionNames = perRegion.Keys.ToList();
         var allIds = perRegion.Values

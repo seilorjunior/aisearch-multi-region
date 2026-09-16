@@ -3,18 +3,19 @@ using Azure.Core.Pipeline;
 using Azure.Identity;
 using Azure.Search.Documents;
 using Azure.Search.Documents.Indexes;
-using Azure.Search.Documents.Indexes.Models;
-using Azure.Search.Documents.Models;
 using Microsoft.Extensions.Configuration;
 
 /// <summary>
-/// Shared fixture for integration tests. Creates a dedicated "products-it" index in every
+/// Shared fixture for integration tests. Creates a unique "products-it-{guid}" index in every
 /// configured region, seeds SampleData.Products, waits for the documents to commit, then
 /// deletes the index on dispose so tests never touch the real "products" index.
 /// </summary>
 public sealed class SearchEnvironmentFixture : IAsyncLifetime
 {
-    /// <summary>Config loaded from appsettings.json with IndexName overridden to "products-it".</summary>
+    private readonly HashSet<RegionConfig> cleanupRegions = new();
+    private HttpClient? gatewayHttpClient;
+
+    /// <summary>Config loaded from appsettings.json with an isolated index and journal per run.</summary>
     public SearchConfig Settings { get; }
 
     /// <summary>Credential used for all SDK calls.</summary>
@@ -26,88 +27,151 @@ public sealed class SearchEnvironmentFixture : IAsyncLifetime
     /// </summary>
     public bool IsConfigured { get; }
 
-    public SearchEnvironmentFixture()
+    public SearchEnvironmentFixture() : this(new ConfigurationBuilder()
+        .SetBasePath(AppContext.BaseDirectory)
+        .AddJsonFile("appsettings.json", optional: true)
+        .AddEnvironmentVariables()
+        .Build())
     {
-        var config = new ConfigurationBuilder()
-            .SetBasePath(AppContext.BaseDirectory)
-            .AddJsonFile("appsettings.json", optional: true)
-            .AddEnvironmentVariables()
-            .Build();
+    }
 
+    internal SearchEnvironmentFixture(IConfiguration config)
+    {
         var raw = config.GetSection("Search").Get<SearchConfig>() ?? new SearchConfig();
-        raw.IndexName = "products-it"; // dedicated test index — never touches production data
+        raw.IndexName = $"products-it-{Guid.NewGuid():N}";
+        raw.ReplicationJournalPath = Path.Combine(AppContext.BaseDirectory, $"{raw.IndexName}-journal.json");
         Settings = raw;
 
         Credential = new DefaultAzureCredential();
 
         IsConfigured = Settings.Regions.Count >= 1 &&
-            Settings.Regions.All(r =>
-                !string.IsNullOrWhiteSpace(r.Endpoint) &&
-                !r.Endpoint.Contains('<') &&
-                !r.Endpoint.Contains("replace", StringComparison.OrdinalIgnoreCase));
+            Settings.Regions.All(r => GatewayConfig.IsValidEndpoint(r.Endpoint) &&
+                new Uri(r.Endpoint).Host.EndsWith(".search.windows.net", StringComparison.OrdinalIgnoreCase));
+
+        var required = string.Equals(config["AZURE_INTEGRATION_REQUIRED"], "true", StringComparison.OrdinalIgnoreCase);
+        if (required && (!IsConfigured || Settings.Regions.Count < 2 || !Settings.Gateway.IsConfigured))
+            throw new InvalidOperationException(
+                "Integration is required: configure two distinct real Search endpoints and an HTTPS gateway URL.");
+        if (IsConfigured)
+            Settings.Validate(requireGateway: required);
+        else if (Settings.Regions.Any(r => GatewayConfig.IsValidEndpoint(r.Endpoint)))
+            throw new InvalidOperationException("Partially configured integration regions are not allowed.");
     }
 
     public async Task InitializeAsync()
     {
         if (!IsConfigured) return;
 
-        // --- 1. Create / update the test index schema in every region ---
-        var index = new SearchIndex(Settings.IndexName, new FieldBuilder().Build(typeof(Product)));
-        await Task.WhenAll(Settings.Regions.Select(async region =>
+        // Register all attempted regions before creation: an interrupted request may still succeed.
+        cleanupRegions.UnionWith(Settings.Regions);
+        try
         {
-            var client = new SearchIndexClient(new Uri(region.Endpoint), Credential);
-            await client.CreateOrUpdateIndexAsync(index);
-        }));
-
-        // --- 2. Seed documents to every region ---
-        var batch = IndexDocumentsBatch.MergeOrUpload(SampleData.Products);
-        await Task.WhenAll(Settings.Regions.Select(async region =>
-        {
-            var client = new SearchClient(new Uri(region.Endpoint), Settings.IndexName, Credential);
-            var result = await client.IndexDocumentsAsync(batch);
-            var failed = result.Value.Results.Where(r => !r.Succeeded).ToList();
-            if (failed.Count > 0)
-                throw new InvalidOperationException(
-                    $"[fixture] {region.Name}: {failed.Count} document(s) failed to seed. " +
-                    string.Join(", ", failed.Select(f => $"{f.Key}: {f.ErrorMessage}")));
-        }));
-
-        // --- 3. Poll until all regions have committed the expected document count (~30s max) ---
-        // POST /docs/search?count=true is authoritative within ~1s of the indexing op.
-        var expected = SampleData.Products.Count;
-        var pending = new HashSet<string>(Settings.Regions.Select(r => r.Name));
-        var deadline = DateTimeOffset.UtcNow.AddSeconds(30);
-
-        while (pending.Count > 0 && DateTimeOffset.UtcNow < deadline)
-        {
-            await Task.Delay(TimeSpan.FromSeconds(1));
-            foreach (var region in Settings.Regions.Where(r => pending.Contains(r.Name)).ToList())
+            foreach (var command in new[] { "init", "seed" })
             {
-                var client = new SearchClient(new Uri(region.Endpoint), Settings.IndexName, Credential);
-                var resp = await client.SearchAsync<Product>(
-                    "*", new SearchOptions { Size = 0, IncludeTotalCount = true });
-                if (resp.Value.TotalCount >= expected)
-                    pending.Remove(region.Name);
+                var result = await RunCommandAsync(command);
+                if (result.ExitCode != 0)
+                    throw new InvalidOperationException(
+                        $"[fixture] {command} failed with exit code {result.ExitCode}:\n{result.Error}\n{result.Output}");
             }
+
+            await WaitForExactReadinessAsync();
+        }
+        catch (Exception initializationError)
+        {
+            try { await DisposeAsync(); }
+            catch (Exception cleanupError)
+            {
+                throw new AggregateException("Integration initialization and cleanup failed.", initializationError, cleanupError);
+            }
+            throw;
+        }
+    }
+
+    public async Task<(int ExitCode, string Output, string Error)> RunCommandAsync(params string[] arguments)
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+        var exitCode = await CliApplication.RunAsync(arguments, loadConfig: _ => Settings,
+            output: output, error: error, cancellationToken: timeout.Token);
+        return (exitCode, output.ToString(), error.ToString());
+    }
+
+    private async Task WaitForExactReadinessAsync()
+    {
+        var pending = Settings.Regions.ToDictionary(r => r.Name, _ => "not queried");
+        var expected = SampleData.Products.ToDictionary(p => p.Id);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        try
+        {
+            while (pending.Count > 0)
+            {
+                foreach (var region in Settings.Regions.Where(r => pending.ContainsKey(r.Name)))
+                {
+                    try
+                    {
+                        var client = new SearchClient(new Uri(region.Endpoint), Settings.IndexName, Credential);
+                        var response = await client.SearchAsync<Product>("*",
+                            new SearchOptions { Size = 1000, IncludeTotalCount = true }, timeout.Token);
+                        var actual = new Dictionary<string, Product>();
+                        await foreach (var item in response.Value.GetResultsAsync().WithCancellation(timeout.Token))
+                            actual.Add(item.Document.Id, item.Document);
+                        var comparison = SyncAnalyzer.Analyze(new Dictionary<string, IReadOnlyDictionary<string, Product>>
+                        {
+                            ["expected"] = expected,
+                            ["actual"] = actual
+                        });
+                        if (response.Value.TotalCount == expected.Count && actual.Count == expected.Count && comparison.InSync)
+                            pending.Remove(region.Name);
+                        else
+                            pending[region.Name] = $"count={response.Value.TotalCount}, content differences={comparison.Issues.Count}";
+                    }
+                    catch (Azure.RequestFailedException ex) when (ex.Status is 404 or 408 or 429 || ex.Status >= 500)
+                    {
+                        pending[region.Name] = $"HTTP {ex.Status}";
+                    }
+                }
+                if (pending.Count > 0)
+                    await Task.Delay(TimeSpan.FromMilliseconds(500), timeout.Token);
+            }
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            throw new TimeoutException("Exact integration document readiness timed out after 60 seconds: " +
+                string.Join("; ", pending.Select(p => $"{p.Key}: {p.Value}")));
         }
     }
 
     public async Task DisposeAsync()
     {
-        if (!IsConfigured) return;
-
-        await Task.WhenAll(Settings.Regions.Select(async region =>
+        var errors = new List<Exception>();
+        foreach (var region in cleanupRegions.ToArray())
         {
             try
             {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
                 var client = new SearchIndexClient(new Uri(region.Endpoint), Credential);
-                await client.DeleteIndexAsync(Settings.IndexName);
+                await client.DeleteIndexAsync(Settings.IndexName, cancellationToken: timeout.Token);
+                cleanupRegions.Remove(region);
             }
-            catch
+            catch (Azure.RequestFailedException ex) when (ex.Status == 404) { cleanupRegions.Remove(region); }
+            catch (Exception ex) { errors.Add(new InvalidOperationException($"Cleanup failed: {region.Name}/{Settings.IndexName}", ex)); }
+        }
+        gatewayHttpClient?.Dispose();
+        gatewayHttpClient = null;
+        try
+        {
+            // This run owns the unique path, and all command instances have released the lock.
+            foreach (var suffix in new[] { "", ".new", ".lock" })
             {
-                // Best-effort cleanup; ignore errors (e.g. index already deleted).
+                var path = Settings.ReplicationJournalPath + suffix;
+                if (File.Exists(path))
+                    File.Delete(path);
             }
-        }));
+        }
+        catch (Exception ex) { errors.Add(ex); }
+        if (errors.Count > 0)
+            throw new AggregateException("Integration cleanup failed; remove the listed isolated indexes manually.", errors);
     }
 
     /// <summary>
@@ -121,12 +185,12 @@ public sealed class SearchEnvironmentFixture : IAsyncLifetime
         var options = new SearchClientOptions();
         if (Settings.Gateway.AllowSelfSignedCert)
         {
-            var handler = new HttpClientHandler
+            gatewayHttpClient ??= new HttpClient(new HttpClientHandler
             {
                 ServerCertificateCustomValidationCallback =
                     HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
-            };
-            options.Transport = new HttpClientTransport(new HttpClient(handler));
+            });
+            options.Transport = new HttpClientTransport(gatewayHttpClient);
         }
         return new SearchClient(new Uri(Settings.Gateway.Url), Settings.IndexName, Credential, options);
     }

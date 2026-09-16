@@ -1,0 +1,16 @@
+{
+  "Search": {
+    "IndexName": "products",
+    "Gateway": {
+      "Url": "https://search.example.com",
+      "AllowSelfSignedCert": false
+    },
+    "ReplicationJournalPath": "./state/replication-journal.json",
+    "ReadinessTimeoutSeconds": 60,
+    "ReadinessPollIntervalMilliseconds": 500,
+    "Regions": [
+      { "Name": "eastus", "Endpoint": "https://contoso-eastus.search.windows.net" },
+      { "Name": "westus2", "Endpoint": "https://contoso-westus2.search.windows.net" }
+    ]
+  }
+}
