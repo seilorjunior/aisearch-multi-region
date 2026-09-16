@@ -433,4 +433,5 @@ az group delete -n rg-aisearch-multiregion --yes --no-wait
 ```
 
 > Cost note: Application Gateway Standard_v2 plus two Basic search services bill per hour. Delete
-> the resource group when you are done.
+> the resource group when you are done. Optional profiles add costs for another gateway,
+> Front Door, private endpoints, increased Search capacity and diagnostic ingestion/retention.
