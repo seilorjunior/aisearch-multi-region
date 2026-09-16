@@ -359,6 +359,7 @@ to `infra/main.parameters.json` for azd):
 | `queryPrincipalId`, `queryPrincipalType` | Query identity receives only `Search Index Data Reader` |
 | `indexingPrincipalId`, `indexingPrincipalType` | Writer receives document contributor and index-management roles |
 | `disableLocalAuth` | Defaults to `true`; API keys are disabled unless explicitly re-enabled |
+| `gatewayHostName` | Optional single-gateway custom DNS hostname matching the trusted listener certificate |
 | `searchReplicaCount`, `searchPartitionCount` | Capacity per service; choose for your SKU, availability requirements and cost |
 | `enablePrivateEndpoints` | Disables public Search access; creates private endpoints and private DNS |
 | `enableFrontDoor` | Creates a second regional gateway and a Front Door endpoint |
@@ -404,6 +405,8 @@ snapshots, and the sample's offset-based comparison is bounded for large indexes
 `scripts/test-failover.ps1` performs an opt-in **Search backend outage** test, not a real Azure
 regional outage or a Front Door gateway-origin outage. It requires an explicit configuration
 file, subscription ID, resource group, gateway name, target region and environment marker.
+Run it with PowerShell 7 on **Linux/macOS or WSL**; native Windows is rejected before mutation.
+The configuration must identify an existing readable index for preflight authentication checks.
 The disposable resource group must have both tags `purpose=isolated-failover` and
 `environment-id=<your-marker>`, and the command requires `-AcknowledgeDestructiveTest`.
 
@@ -413,6 +416,9 @@ backend health and query failures/staleness, restores access, and reconciles the
 It reports observed failover/recovery timing and transient errors instead of requiring zero
 errors throughout. Private-endpoint and unrelated gateway topologies are rejected before
 mutation. Use `-SkipSslValidation` only for a self-signed demo gateway.
+The test requires both direct query rejection and an unhealthy gateway backend. If `/ping`
+remains healthy after public access is disabled, the exercise fails rather than claiming
+failover; a liveness probe alone cannot detect every data-plane failure.
 
 Restoration runs in `finally`, including after test failures, but cannot survive a killed
 process or lost host. Keep an independent operator ready to restore the target service's

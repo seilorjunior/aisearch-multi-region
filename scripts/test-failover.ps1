@@ -3,6 +3,7 @@
 .SYNOPSIS
     Destructive, opt-in failover exercise for a dedicated PUBLIC-endpoint demo.
 .DESCRIPTION
+    Runs on Linux/macOS with PowerShell 7 and a native az launcher (Windows: use WSL).
     Requires an explicit appsettings-format ConfigPath, Azure resource IDs/names,
     and RG tags purpose=isolated-failover and environment-id=<EnvironmentMarker>.
     Validates every backend and the gateway before creating disposable indexes.
@@ -11,6 +12,9 @@
     Replays the missed sentinel update explicitly; this is NOT automatic replication.
     Never run against production. Process termination/host failure can prevent finally
     from running: keep an independent operator ready to restore publicNetworkAccess.
+.PARAMETER SkipSslValidation
+    Explicitly bypass certificate validation for the gateway only.
+    Direct regional requests always validate TLS certificates.
 .EXAMPLE
     ./scripts/test-failover.ps1 -ConfigPath ./test-settings.json `
       -SubscriptionId <guid> -ResourceGroup rg-isolated-demo `
@@ -33,6 +37,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($IsWindows) {
+    throw 'This script requires Linux/macOS (or WSL) with a native Azure CLI launcher; az.cmd is not supported. No mutations performed.'
+}
 if (-not $AcknowledgeDestructiveTest) {
     throw 'No mutations performed. Supply -AcknowledgeDestructiveTest only for a disposable isolated environment.'
 }
@@ -78,6 +85,17 @@ function Get-BackendHealth {
         '--name', $ApplicationGatewayName)
 }
 
+function Assert-NoPrivateEndpoints($Service, $Connections, [string] $ServiceId) {
+    if ($null -eq $Connections -or $Connections.PSObject.Properties.Name -notcontains 'value' -or
+        $Connections.value -isnot [array] -or $Connections.nextLink) {
+        throw "Cannot verify the private endpoint collection shape/completeness for $ServiceId. No mutations performed."
+    }
+    if ($Connections.value.Count -gt 0 -or
+        @($Service.properties.privateEndpointConnections).Where({ $null -ne $_ }).Count -gt 0) {
+        throw "Private endpoint topology is unsupported: disabling public access would not isolate gateway traffic ($ServiceId)."
+    }
+}
+
 function Assert-RootUrl([string] $Value) {
     $uri = $null
     if (-not [uri]::TryCreate($Value, [UriKind]::Absolute, [ref] $uri) -or
@@ -110,9 +128,9 @@ foreach ($region in $regions) {
     $service = Invoke-Arm GET $serviceId '2023-11-01'
     if ($service.id -ine $serviceId -or $service.properties.publicNetworkAccess -cne 'enabled' -and
         $service.properties.publicNetworkAccess -cne 'Enabled') { throw "Backend must belong to the dedicated RG and have public access enabled: $serviceId" }
-    if (@($service.properties.privateEndpointConnections).Where({ $null -ne $_ }).Count -gt 0) {
-        throw "Private endpoint topology is unsupported: disabling public access would not isolate gateway traffic ($serviceId)."
-    }
+    # Query the dedicated collection: omission from the service GET is not proof of absence.
+    $connections = Invoke-Arm GET "$serviceId/privateEndpointConnections" '2023-11-01'
+    Assert-NoPrivateEndpoints $service $connections $serviceId
     $regionMap[$uri.Host] = @{ Name = $region.Name; Endpoint = $uri.GetLeftPart([UriPartial]::Authority); Id = $serviceId }
     $names[$region.Name] = $uri.Host
 }
@@ -166,15 +184,24 @@ $token = (Invoke-AzJson @('account', 'get-access-token', '--subscription', "$Sub
     '--resource', 'https://search.azure.com')).accessToken
 if (-not $token) { throw 'No Search bearer token obtained.' }
 $handler = [System.Net.Http.HttpClientHandler]::new()
+$handler.AllowAutoRedirect = $false
 if ($SkipSslValidation) {
     $handler.ServerCertificateCustomValidationCallback = [System.Net.Http.HttpClientHandler]::DangerousAcceptAnyServerCertificateValidator
 }
-$client = [System.Net.Http.HttpClient]::new($handler)
+$directHandler = [System.Net.Http.HttpClientHandler]::new()
+$directHandler.AllowAutoRedirect = $false
+$client = [System.Net.Http.HttpClient]::new($directHandler)
 $client.Timeout = [TimeSpan]::FromSeconds(10)
+$gatewayClient = [System.Net.Http.HttpClient]::new($handler)
+$gatewayClient.Timeout = [TimeSpan]::FromSeconds(10)
 $index = 'failover-it-' + [guid]::NewGuid().ToString('N')
 $attempted = [System.Collections.Generic.List[object]]::new()
 $restoreRequired = $false
-$metrics = @{ QueryAttempts = 0; QueryErrors = 0; StaleResponses = 0; FailoverSeconds = $null; RecoverySeconds = $null }
+$metrics = @{
+    QueryAttempts = 0; QueryErrors = 0; StaleResponses = 0; TargetRejections = 0
+    GatewayQueryAttempts = 0; GatewayQueryErrors = 0; GatewayStaleResponses = 0
+    FailoverSeconds = $null; RecoverySeconds = $null
+}
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 function Invoke-Search([string] $Endpoint, [string] $Method, [string] $Path, $Body = $null) {
@@ -187,7 +214,8 @@ function Invoke-Search([string] $Endpoint, [string] $Method, [string] $Path, $Bo
     }
     $response = $null
     try {
-        $response = $client.SendAsync($request).GetAwaiter().GetResult()
+        $requestClient = if ($Endpoint -eq $gatewayUri.GetLeftPart([UriPartial]::Authority)) { $gatewayClient } else { $client }
+        $response = $requestClient.SendAsync($request).GetAwaiter().GetResult()
         $text = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
         if (-not $response.IsSuccessStatusCode) {
             throw [System.Net.Http.HttpRequestException]::new("Search HTTP $([int]$response.StatusCode)", $null, $response.StatusCode)
@@ -210,16 +238,20 @@ function Write-Sentinel($Region, [int] $Version) {
 
 function Test-Ready([string] $Endpoint, [int] $Version) {
     $metrics.QueryAttempts++
+    $isGateway = $Endpoint -eq $gatewayUri.GetLeftPart([UriPartial]::Authority)
+    if ($isGateway) { $metrics.GatewayQueryAttempts++ }
     try {
         $result = Invoke-Search $Endpoint POST "indexes/$index/docs/search" @{ search = '*'; top = 2; count = $true }
         if ($result.'@odata.count' -ne 1 -or @($result.value).Count -ne 1 -or
             $result.value[0].id -cne 'sentinel' -or $result.value[0].version -ne $Version) {
             $metrics.StaleResponses++
+            if ($isGateway) { $metrics.GatewayStaleResponses++ }
             return $false
         }
         return $true
     } catch {
         $metrics.QueryErrors++
+        if ($isGateway) { $metrics.GatewayQueryErrors++ }
         Write-Host "Observed query error at ${Endpoint}: $_"
         return $false
     }
@@ -309,9 +341,9 @@ try {
         $metrics.QueryAttempts++
         try { $null = Invoke-Search $target.Endpoint POST "indexes/$index/docs/search" @{ search = '*'; top = 0 } }
         catch {
-            $metrics.QueryErrors++
             # Auth was checked before mutation; require explicit rejection, not an arbitrary timeout.
             $rejected = $_.Exception.StatusCode -eq [System.Net.HttpStatusCode]::Forbidden
+            if ($rejected) { $metrics.TargetRejections++ } else { $metrics.QueryErrors++ }
         }
         $null = Test-Ready $gatewayEndpoint 1
         $health = Get-BackendHealth
@@ -363,6 +395,7 @@ try {
         }
     } finally {
         $client.Dispose()
+        $gatewayClient.Dispose()
         Write-Host ($metrics | ConvertTo-Json)
         Write-Host 'These are sampled observations, not a zero-error availability guarantee.'
     }

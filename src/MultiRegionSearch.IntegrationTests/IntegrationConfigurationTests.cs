@@ -24,6 +24,8 @@ public class IntegrationConfigurationTests
         Assert.Matches("^products-it-[0-9a-f]{32}$", first.Settings.IndexName);
         Assert.NotEqual(first.Settings.IndexName, second.Settings.IndexName);
         Assert.NotEqual(first.Settings.ReplicationJournalPath, second.Settings.ReplicationJournalPath);
+        Assert.Equal(first.Settings.IndexName,
+            Path.GetFileName(Path.GetDirectoryName(first.Settings.ReplicationJournalPath)));
     }
 
     [Fact]
@@ -55,5 +57,24 @@ public class IntegrationConfigurationTests
         var fixture = new SearchEnvironmentFixture(Configuration(true, endpoints: true, gateway: true));
         await fixture.DisposeAsync();
         await fixture.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Cleanup_RemovesOwnedJournalFilesAndDirectory()
+    {
+        var fixture = new SearchEnvironmentFixture(Configuration(false));
+        var directory = Path.GetDirectoryName(fixture.Settings.ReplicationJournalPath)!;
+        try
+        {
+            Directory.CreateDirectory(directory);
+            foreach (var suffix in new[] { "", ".lock", ".new" })
+                await File.WriteAllTextAsync(fixture.Settings.ReplicationJournalPath + suffix, "{}");
+            await fixture.DisposeAsync();
+            Assert.False(Directory.Exists(directory));
+        }
+        finally
+        {
+            await fixture.DisposeAsync();
+        }
     }
 }

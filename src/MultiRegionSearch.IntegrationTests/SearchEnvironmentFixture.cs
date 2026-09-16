@@ -13,6 +13,7 @@ using Microsoft.Extensions.Configuration;
 public sealed class SearchEnvironmentFixture : IAsyncLifetime
 {
     private readonly HashSet<RegionConfig> cleanupRegions = new();
+    private readonly string journalDirectory;
     private HttpClient? gatewayHttpClient;
 
     /// <summary>Config loaded from appsettings.json with an isolated index and journal per run.</summary>
@@ -39,7 +40,8 @@ public sealed class SearchEnvironmentFixture : IAsyncLifetime
     {
         var raw = config.GetSection("Search").Get<SearchConfig>() ?? new SearchConfig();
         raw.IndexName = $"products-it-{Guid.NewGuid():N}";
-        raw.ReplicationJournalPath = Path.Combine(AppContext.BaseDirectory, $"{raw.IndexName}-journal.json");
+        journalDirectory = Path.Combine(AppContext.BaseDirectory, "integration-artifacts", raw.IndexName);
+        raw.ReplicationJournalPath = Path.Combine(journalDirectory, "replication-journal.json");
         Settings = raw;
 
         Credential = new DefaultAzureCredential();
@@ -168,6 +170,8 @@ public sealed class SearchEnvironmentFixture : IAsyncLifetime
                 if (File.Exists(path))
                     File.Delete(path);
             }
+            if (Directory.Exists(journalDirectory))
+                Directory.Delete(journalDirectory);
         }
         catch (Exception ex) { errors.Add(ex); }
         if (errors.Count > 0)
@@ -187,6 +191,7 @@ public sealed class SearchEnvironmentFixture : IAsyncLifetime
         {
             gatewayHttpClient ??= new HttpClient(new HttpClientHandler
             {
+                AllowAutoRedirect = false,
                 ServerCertificateCustomValidationCallback =
                     HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
             });

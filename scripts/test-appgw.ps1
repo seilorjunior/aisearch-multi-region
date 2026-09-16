@@ -59,6 +59,7 @@ function Write-Section([string]$title) {
 function New-HttpClient {
     param([switch]$Gateway)
     $handler = [System.Net.Http.HttpClientHandler]::new()
+    $handler.AllowAutoRedirect = $false
     if ($Gateway -and $SkipSslValidation) {
         $handler.ServerCertificateCustomValidationCallback =
             [System.Net.Http.HttpClientHandler]::DangerousAcceptAnyServerCertificateValidator

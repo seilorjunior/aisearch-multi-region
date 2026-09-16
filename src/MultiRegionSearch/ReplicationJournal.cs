@@ -20,6 +20,7 @@ public sealed class ReplicationBatch
 /// </summary>
 public sealed class ReplicationJournal : IDisposable
 {
+    private const UnixFileMode PrivateFileMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
     private readonly string path;
     private readonly FileStream writerLock;
     public ReplicationBatch? Batch { get; private set; }
@@ -27,13 +28,17 @@ public sealed class ReplicationJournal : IDisposable
     public ReplicationJournal(SearchConfig settings)
     {
         path = Path.GetFullPath(settings.ReplicationJournalPath);
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        if (OperatingSystem.IsWindows())
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        else
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!, PrivateFileMode | UnixFileMode.UserExecute);
         // Keep the lock file: deleting it would permit processes to lock different inodes.
-        writerLock = new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        writerLock = OpenPrivateFile(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite);
         try
         {
             if (File.Exists(path))
             {
+                if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(path, PrivateFileMode);
                 Batch = JsonSerializer.Deserialize<ReplicationBatch>(File.ReadAllText(path))
                     ?? throw new InvalidDataException("Empty replication journal.");
                 Validate(settings, Batch);
@@ -82,7 +87,7 @@ public sealed class ReplicationJournal : IDisposable
 
     public void Save()
     {
-        using (var file = new FileStream(path + ".new", FileMode.Create, FileAccess.Write, FileShare.None))
+        using (var file = OpenPrivateFile(path + ".new", FileMode.Create, FileAccess.Write))
         {
             JsonSerializer.Serialize(file, Batch);
             file.Flush(flushToDisk: true);
@@ -90,6 +95,19 @@ public sealed class ReplicationJournal : IDisposable
         // Same-directory rename is atomic on supported local filesystems. The old state
         // remains usable after interruption; unacknowledged writes may safely be repeated.
         File.Move(path + ".new", path, overwrite: true);
+    }
+
+    private static FileStream OpenPrivateFile(string filePath, FileMode mode, FileAccess access)
+    {
+        var options = new FileStreamOptions { Mode = mode, Access = access, Share = FileShare.None };
+        if (!OperatingSystem.IsWindows()) options.UnixCreateMode = PrivateFileMode;
+        var stream = new FileStream(filePath, options);
+        try
+        {
+            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(filePath, PrivateFileMode);
+            return stream;
+        }
+        catch { stream.Dispose(); throw; }
     }
 
     public void Dispose() => writerLock.Dispose();

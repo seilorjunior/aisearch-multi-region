@@ -245,6 +245,17 @@ public sealed class CommandTests : IDisposable
     }
 
     [Fact]
+    public void JournalAndLockFilesAreOwnerOnlyOnUnix()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        using var journal = new ReplicationJournal(Settings);
+        journal.Begin(Settings, SampleData.Products);
+        var expected = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        Assert.Equal(expected, File.GetUnixFileMode(Settings.ReplicationJournalPath));
+        Assert.Equal(expected, File.GetUnixFileMode(Settings.ReplicationJournalPath + ".lock"));
+    }
+
+    [Fact]
     public async Task ChangedDestinationAndCorruptJournalFailClosed()
     {
         using (var journal = new ReplicationJournal(Settings)) journal.Begin(Settings, SampleData.Products);

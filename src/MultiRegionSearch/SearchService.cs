@@ -20,19 +20,25 @@ public interface ISearchService
 public sealed class AzureSearchService : ISearchService, IDisposable
 {
     private readonly SearchConfig settings;
-    private readonly TokenCredential credential = new DefaultAzureCredential();
+    private readonly TokenCredential credential;
+    private readonly HttpPipelineTransport? transport;
     private readonly Dictionary<string, SearchClient> clients;
     private readonly SearchClient? gateway;
     private readonly HttpClient? insecureHttpClient;
 
-    public AzureSearchService(SearchConfig settings)
+    public AzureSearchService(SearchConfig settings, TokenCredential? credential = null, HttpPipelineTransport? transport = null)
     {
         this.settings = settings;
+        this.credential = credential ?? new DefaultAzureCredential();
+        this.transport = transport;
+        var directOptions = new SearchClientOptions();
+        if (transport is not null) directOptions.Transport = transport;
         clients = settings.Regions.ToDictionary(r => r.Name,
-            r => new SearchClient(new Uri(r.Endpoint), settings.IndexName, credential));
+            r => new SearchClient(new Uri(r.Endpoint), settings.IndexName, this.credential, directOptions));
         if (settings.Gateway.IsConfigured)
         {
             var options = new SearchClientOptions();
+            if (transport is not null) options.Transport = transport;
             if (settings.Gateway.AllowSelfSignedCert)
             {
                 insecureHttpClient = new HttpClient(new HttpClientHandler
@@ -41,14 +47,16 @@ public sealed class AzureSearchService : ISearchService, IDisposable
                 });
                 options.Transport = new HttpClientTransport(insecureHttpClient);
             }
-            gateway = new SearchClient(new Uri(settings.Gateway.Url), settings.IndexName, credential, options);
+            gateway = new SearchClient(new Uri(settings.Gateway.Url), settings.IndexName, this.credential, options);
         }
     }
 
     public async Task InitializeAsync(RegionConfig region, CancellationToken cancellationToken)
     {
         var index = new SearchIndex(settings.IndexName, new FieldBuilder().Build(typeof(Product)));
-        await new SearchIndexClient(new Uri(region.Endpoint), credential)
+        var options = new SearchClientOptions();
+        if (transport is not null) options.Transport = transport;
+        await new SearchIndexClient(new Uri(region.Endpoint), credential, options)
             .CreateOrUpdateIndexAsync(index, cancellationToken: cancellationToken);
     }
 
